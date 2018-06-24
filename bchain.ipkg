@@ -1,0 +1,6 @@
+package bchain
+
+sourcedir = iblockchain
+modules = BlockchainMain, ProcessLib
+
+pkgs = contrib, crypto
