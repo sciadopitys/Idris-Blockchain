@@ -1,7 +1,11 @@
+module BlockchainMain
+
 import Data.Vect
 import Data.Bits
+import ProcessLib
+import Network.Socket
 import src.Data.Crypto.Hash.MD5
-import src.Data.Crypto.Hash1
+import src.Data.Crypto.Hash
 
 record Node where
        constructor CreateNode
@@ -58,6 +62,23 @@ processInput : Blockchain -> String -> Maybe (String, Blockchain)
 processInput chain input = case span (/= ' ') input of
                                 (command, newStr) => executeCommand chain command newStr
 
-main : IO ()
-main = let foundPair = findNonceAndHash 1 "Genesis Block" 1 (intToBits 0)
-       in replWith (CreateChain 1 [CreateNode 1 (fst foundPair) "Genesis Block" (intToBits 0) (snd foundPair)]) "Command: " processInput
+{-bindSock : Socket -> SocketAddress -> Int -> IO Int
+bindSock (Left l) _ _ = pure (-1)
+bindSock (Right r) addr portNum = bind r (Just addr) portNum-}
+
+initSockets : Vect n Int -> Vect n ((Maybe Socket), SocketAddress)
+initSockets [] = []
+initSockets (x :: xs) = let curAddr = IPv4Addr 127 0 0 1
+                        in do curSocket <- socket AF_INET Datagram 0
+                              case curSocket of
+                                   (Left l) => (Nothing, curAddr) :: initSockets xs
+                                   (Right r) => bind r (Just curAddr) x
+                                                (r, curAddr) :: initSockets xs
+
+
+procMain : Vect n Int -> (Process NoRecv () NoRequest NoRequest)
+procMain [] = let foundPair = findNonceAndHash 1 "Genesis Block" 1 (intToBits 0)
+              in Action (replWith (CreateChain 1 [CreateNode 1 (fst foundPair) "Genesis Block" (intToBits 0) (snd foundPair)]) "Command: " processInput)
+procMain (x :: xs) = let portList = initSockets (x :: xs)
+                         foundPair = findNonceAndHash 1 "Genesis Block" 1 (intToBits 0)
+                     in Action (replWith (CreateChain 1 [CreateNode 1 (fst foundPair) "Genesis Block" (intToBits 0) (snd foundPair)]) "Command: " processInput)
