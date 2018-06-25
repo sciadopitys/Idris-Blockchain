@@ -67,12 +67,12 @@ processInput chain input = case span (/= ' ') input of
 bindSock (Left l) _ _ = pure (-1)
 bindSock (Right r) addr portNum = bind r (Just addr) portNum-}
 
-initSockets : Vect n Int -> Vect n ((Maybe Socket), SocketAddress)
+initSockets : Vect n Int -> List (Socket, SocketAddress)
 {-initSockets [] = []
 initSockets (x :: xs) = let curAddr = IPv4Addr 127 0 0 1
                         in do curSocket <- socket AF_INET Datagram 0
                               case curSocket of
-                                   (Left l) => (Nothing, curAddr) :: initSockets xs
+                                   (Left l) => initSockets xs
                                    (Right r) => bind r (Just curAddr) x
                                                 (r, curAddr) :: initSockets xs-}
 
