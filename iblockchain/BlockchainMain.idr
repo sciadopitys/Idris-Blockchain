@@ -67,22 +67,24 @@ executeCommand chain "display" "" = Just ((display chain), chain)
 executeCommand chain "quit" "" = Nothing
 executeCommand chain _ _ = Just ("Invalid command\n", chain)
 
-executeCommandAlt : (chain : Blockchain) -> (command : String) -> (newStr : String) -> (sock : Socket) -> (addrs : Vect n UDPAddrInfo) -> Maybe (String, Blockchain)
+executeCommandAlt : (chain : Blockchain) -> (command : String) -> (newStr : String) -> (sock : Socket) -> (addrs : Vect n UDPAddrInfo) -> IO (Maybe (String, Blockchain))
 executeCommandAlt chain "add" newStr sock addrs = let newStrAct = strTail(newStr)
                                                       newChain = addNode chain newStrAct
-                                                      success = sendToProcs newStrAct sock addrs
-                                                  in Just ("Added new node\n", newChain)
-executeCommandAlt chain _ _ _ _ = Just ("Invalid command\n", chain)
+                                                  in do success <- sendToProcs newStrAct sock addrs
+                                                        case success of
+                                                             False => pure (Just ("Unable to send message; did not add node\n", chain))
+                                                             True => pure (Just ("Added new node and sent message\n", newChain))
+executeCommandAlt chain "display" "" _ _ = pure (Just ((display chain), chain))
+executeCommandAlt chain "quit" "" _ _ = pure Nothing
+executeCommandAlt chain _ _ _ _ = pure (Just ("Invalid command\n", chain))
 
 processInput : Blockchain -> String -> Maybe (String, Blockchain)
 processInput chain input = case span (/= ' ') input of
                                 (command, newStr) => executeCommand chain command newStr
 
-processInputAlt : Blockchain -> String -> Socket -> Vect n UDPAddrInfo -> Maybe (String, Blockchain)
+processInputAlt : Blockchain -> String -> Socket -> Vect n UDPAddrInfo -> IO (Maybe (String, Blockchain))
 processInputAlt chain input sock addrs = case span (/= ' ') input of
-                                              (command, newStr) => if ((length command) == 3)
-                                                                      then executeCommandAlt chain command newStr sock addrs
-                                                                      else executeCommand chain command newStr
+                                              (command, newStr) => executeCommandAlt chain command newStr sock addrs
 
 createAddrs : Vect n Int -> Vect n UDPAddrInfo
 createAddrs [] = []
@@ -118,7 +120,8 @@ processInputLoop sock addrs chain = do addedStr <- Request 1
                                        if ((length addedStr) == 0)
                                           then do Action (putStr "Command: ")
                                                   command <- Action (getLine)
-                                                  case processInputAlt chain command sock addrs of
+                                                  pInput <- Action (processInputAlt chain command sock addrs)
+                                                  case pInput of
                                                        Nothing => Pure ()
                                                        Just x => do Action (putStr (fst x))
                                                                     LoopNoReq (processInputLoop sock addrs (snd x))
