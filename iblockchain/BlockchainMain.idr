@@ -74,9 +74,8 @@ executeCommandAlt chain "add" newStr sock addrs = let newStrAct = strTail(newStr
                                                         case success of
                                                              False => pure (Just ("Unable to send message; did not add node\n", chain))
                                                              True => pure (Just ("Added new node and sent message\n", newChain))
-executeCommandAlt chain "display" "" _ _ = pure (Just ((display chain), chain))
-executeCommandAlt chain "quit" "" _ _ = pure Nothing
-executeCommandAlt chain _ _ _ _ = pure (Just ("Invalid command\n", chain))
+executeCommandAlt chain "update" _ _ _ = pure (Just ("Attempting to sync chains\n", chain))
+executeCommandAlt chain command newStr _ _ = pure (executeCommand chain command newStr)
 
 processInput : Blockchain -> String -> Maybe (String, Blockchain)
 processInput chain input = case span (/= ' ') input of
