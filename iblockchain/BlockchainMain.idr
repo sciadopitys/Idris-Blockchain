@@ -97,34 +97,26 @@ receiver sock pid = do received <- Action (recvFrom sock 2048)
                             Right r => do (Respond pid (\msg => Pure (fst (snd r))))
                                           Loop (receiver sock pid)
 
-{-responder : Socket -> PID -> (Process ProcessLib.receiverType () NoRequest Complete)
-responder sock pid = do Respond pid (\msg => Pure "2")
-                        Loop (responder sock pid)-}
-
 spawnProcesses : Vect n UDPAddrInfo -> Socket -> PID -> IO ()
 spawnProcesses [] sock myPid = pure ()
 spawnProcesses (x :: xs) sock myPid = do pid <- spawn (do run forever (receiver sock myPid)
                                                           pure ())
                                          spawnProcesses xs sock myPid
 
-{-spawnProcesses1 : Vect n Int -> Socket -> PID -> IO ()
-spawnProcesses1 [] sock myPid = pure ()
-spawnProcesses1 (x :: xs) sock myPid = do pid <- spawn (do run forever (responder sock myPid)
-                                                           pure ())
-                                          spawnProcesses1 xs sock myPid-}
-
-
-processInputLoop : Socket -> Vect n UDPAddrInfo -> Blockchain -> (Process NoRecv () NoRequest NoRequest)
+processInputLoop : Socket -> Vect n UDPAddrInfo -> Blockchain -> (Process ProcessLib.clientType () NoRequest NoRequest)
 processInputLoop sock addrs chain = do addedStr <- Request 1
                                        if ((length addedStr) == 0)
                                           then do Action (putStr "Command: ")
                                                   command <- Action (getLine)
                                                   pInput <- Action (processInputAlt chain command sock addrs)
                                                   case pInput of
-                                                       Nothing => Pure ()
+                                                       Nothing => RespondToEnd (\msg => Pure ())
                                                        Just x => do Action (putStr (fst x))
                                                                     LoopNoReq (processInputLoop sock addrs (snd x))
                                           else LoopNoReq (processInputLoop sock addrs (addNode chain addedStr))
+
+infLoop : Int -> IO ()
+infLoop x = infLoop (1 + x)
 
 procMain : Vect n Int -> (Process NoRecv () NoRequest NoRequest)
 procMain [] = let genNumBits = the (Bits 128) (intToBits 1)
@@ -147,15 +139,5 @@ procMain (x :: xs) = let myAddr = IPv4Addr 127 0 0 1
                                                  then do Just loopPID <- SpawnClient (processInputLoop r udpAddrVect (CreateChain 1 [CreateNode 1 (fst foundPair) "Genesis Block" (intToBits 0) (snd foundPair)]))
                                                               | Nothing => Action (putStrLn "spawn failed")
                                                          Action (spawnProcesses udpAddrVect r loopPID)
+                                                         Action (infLoop 0)
                                                  else Action (putStrLn "bind failed")
-
-{-client1 : (Process NoRecv () NoRequest NoRequest)
-client1 = do answer <- Request 1
-             Action (printLn answer)
-
-procMain1 : (Process NoRecv () NoRequest NoRequest)
-procMain1 = do sock <- Action (socket AF_INET Datagram 0)
-               case sock of
-                    Left l => Action (putStrLn "socket failed")
-                    Right r => do Just clientid <- SpawnClient client1 | Nothing => Action (putStrLn "spawn failed")
-                                  Action (spawnProcesses1 [1] r clientid)-}

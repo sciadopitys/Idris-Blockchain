@@ -21,6 +21,10 @@ receiverType : Int -> Type
 receiverType x = String
 
 public export
+clientType : Int -> Type
+clientType x = ()
+
+public export
 NoRecv : Void -> Type
 NoRecv = const Void
 
@@ -39,7 +43,9 @@ data Process : (iface : reqType -> Type) -> Type -> (inState : ProcState) -> (ou
      Spawn : Process service_iface () NoRequest Complete -> Process iface (Maybe PID) st st
      SpawnClient : Process service_iface () NoRequest NoRequest -> Process iface (Maybe PID) st st
      Request : (msg : service_reqType) -> Process iface String st st
-     Respond : PID -> ((msg : reqType) -> Process iface (iface msg) NoRequest NoRequest) -> Process iface (Maybe reqType) st Sent
+     RequestToWait : PID -> (msg : service_reqType) -> Process iface () st st
+     Respond : PID -> ((msg : reqType) -> Process iface (iface msg) NoRequest NoRequest) -> Process iface (Maybe ()) st Sent
+     RespondToEnd : ((msg : reqType) -> Process iface (iface msg) NoRequest NoRequest) -> Process iface () st st
      Loop : Inf (Process iface a NoRequest Complete) -> Process iface a Sent Complete
      LoopFail : Inf (Process iface a NoRequest Complete) -> Process iface a NoRequest Complete
      LoopNoReq : Inf (Process iface a NoRequest NoRequest) -> Process iface a NoRequest NoRequest
@@ -71,16 +77,26 @@ run fuel (SpawnClient process) = do Just pid <- spawn (do run fuel process
 run (More fuel) (Loop act) = run fuel act
 run (More fuel) (LoopFail act) = run fuel act
 run (More fuel) (LoopNoReq act) = run fuel act
-run fuel (Request msg) = do Just channel <- listen 1 | _ => pure Nothing
+run fuel (Request msg) = do Just channel <- listen 1 | _ => pure (Just "")
                             ok <- unsafeSend channel msg
-                            if ok then do Just x <- unsafeRecv String channel | Nothing => pure Nothing
+                            if ok then do Just x <- unsafeRecv String channel | Nothing => pure (Just "")
                                           pure (Just x)
-                                  else pure Nothing
+                                  else pure (Just "")
+run fuel (RequestToWait process msg) = do Just channel <- connect process | _ => do pure Nothing
+                                          ok <- unsafeSend channel msg
+                                          if ok then do Just x <- unsafeRecv () channel | Nothing => do pure Nothing
+                                                        pure (Just ())
+                                                else do pure Nothing
 run fuel (Respond {reqType} process f) = do Just sender <- connect process | Nothing => pure (Just Nothing)
                                             Just msg <- unsafeRecv reqType sender | Nothing => pure (Just Nothing)
                                             Just response <- run fuel (f msg) | Nothing => pure Nothing
                                             unsafeSend sender response
-                                            pure (Just (Just msg))
+                                            pure (Just (Just ()))
+run fuel (RespondToEnd {reqType} f) = do Just sender <- listen 1 | Nothing => pure Nothing
+                                         Just msg <- unsafeRecv reqType sender | Nothing => pure Nothing
+                                         Just response <- run fuel (f msg) | Nothing => pure Nothing
+                                         unsafeSend sender response
+                                         pure (Just ())
 
 export partial
 runProc : Process iface () ist ost -> IO ()
