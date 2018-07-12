@@ -18,7 +18,7 @@ record Node where
        hash : Bits 128
 
 Show Node where
-  show (CreateNode node nonce dataField prevHash hash) = "Node #: " ++ show node ++ "\nNonce: " ++ show nonce ++ "\nData: " ++ show dataField ++ "\n" ++ "\nPrevious Hash: " ++ show prevHash ++ "\nHash: " ++ show hash
+  show (CreateNode node nonce dataField prevHash hash) = "\nNode #: " ++ show node ++ "\nNonce: " ++ show nonce ++ "\nData: " ++ show dataField ++ "\nPrevious Hash: " ++ show prevHash ++ "\nHash: " ++ show hash
 
 record Blockchain where
        constructor CreateChain
@@ -37,21 +37,20 @@ findNonceAndHash nodeNumBits datumBits curNonce prev = let nonceBits =  the (Bit
                                                                False => findNonceAndHash nodeNumBits datumBits (curNonce + 1) prev
                                                                True => (curNonce, curHash)
 
-addNodeAlt : Blockchain -> (newStr : String) -> (Blockchain, Bits 128)
-addNodeAlt (CreateChain size chain) newStr = let foundPair1 = addToChain chain
-                                             in ((CreateChain (S size) (fst foundPair1)), (snd foundPair1)) where
-    addToChain : Vect curSize Node -> ((Vect (S curSize) Node), Bits 128)
-    addToChain [x] = let curNumBits = the (Bits 128) (intToBits (toIntegerNat (S size)))
-                         newStrCharList = unpack newStr
-                         newStrToInt = getIntRep newStrCharList 0
-                         newStrBits =  the (Bits 128) (intToBits newStrToInt)
-                         foundPair = findNonceAndHash curNumBits newStrBits 1 (hash x)
-                         newHash = snd foundPair
-                     in ((x :: [CreateNode (S size) (fst foundPair) newStr (hash x) newHash]), newHash)
-    addToChain (x :: xs) = ((x :: (fst (addToChain xs))), (snd (addToChain xs)))
+addNodeAlt : Blockchain -> String -> Integer -> (Blockchain, (Integer, Bits 128))
+addNodeAlt (CreateChain size chain) newStr start = let foundPair1 = addToChain chain start
+                                                   in ((CreateChain (S size) (fst foundPair1)), (snd foundPair1)) where
+                                                       addToChain : (Vect n Node) -> Integer -> ((Vect (S n) Node), (Integer, Bits 128))
+                                                       addToChain [last] y = let curNumBits = the (Bits 128) (intToBits (toIntegerNat (S size)))
+                                                                                 newStrCharList = unpack newStr
+                                                                                 newStrToInt = getIntRep newStrCharList 0
+                                                                                 newStrBits =  the (Bits 128) (intToBits newStrToInt)
+                                                                                 foundPair = findNonceAndHash curNumBits newStrBits y (hash last)
+                                                                              in ((last :: [CreateNode (S size) (fst foundPair) newStr (hash last) (snd foundPair)]), foundPair)
+                                                       addToChain (x :: xs) y = ((x :: (fst (addToChain xs y))), (snd (addToChain xs y)))
 
 addNode : Blockchain -> String -> Blockchain
-addNode chain newStr = fst (addNodeAlt chain newStr)
+addNode chain newStr = fst (addNodeAlt chain newStr 1)
 
 display : Blockchain -> String
 display (CreateChain size chain) = displayChain chain where
@@ -70,10 +69,12 @@ recvConf : Socket -> Vect n UDPAddrInfo -> (IO Bool)
 recvConf sock [] = pure True
 recvConf sock (x :: xs) = do received <- recvFrom sock 2048
                              case received of
-                                  Left l => pure False
+                                  Left l => do pure False
                                   Right r => case (fst (snd r)) of
-                                                  "yes" => recvConf sock xs
-                                                  _ => pure False
+                                                  "yes" => do putStrLn "Acceptance received"
+                                                              recvConf sock xs
+                                                  _ => do putStrLn "Denial received"
+                                                          pure False
 
 executeCommand : (chain : Blockchain) -> (command : String) -> (newStr : String) -> Maybe (String, Blockchain)
 executeCommand chain "add" newStr = Just ("Added new node\n", addNode chain (strTail(newStr)))
@@ -83,16 +84,43 @@ executeCommand chain _ _ = Just ("Invalid command\n", chain)
 
 executeCommandAlt : (chain : Blockchain) -> (command : String) -> (newStr : String) -> (sock : Socket) -> (addrs : Vect n UDPAddrInfo) -> IO (Maybe (String, Blockchain))
 executeCommandAlt chain "add" newStr sock addrs = let newStrAct = strTail(newStr)
-                                                      newChain = addNodeAlt chain newStrAct
-                                                  in do success <- sendToProcs (newStrAct ++ "+" ++ (bitsToStr (snd newChain))) sock addrs
+                                                      newChain = addNodeAlt chain newStrAct 1
+                                                      foundPair = snd newChain
+                                                      sendStr = newStrAct ++ "+" ++ (show (fst foundPair)) ++ "+" ++ (bitsToStr (snd foundPair))
+                                                  in do success <- sendToProcs sendStr sock addrs
                                                         case success of
                                                              False => pure (Just ("Unable to send message; did not add node\n", chain))
                                                              True => do consensus <- recvConf sock addrs
                                                                         case consensus of
-                                                                             False => pure (Just ("Consensus not reached; did not add node\n", chain))
-                                                                             True => pure (Just ("Consensus reached; added node", (fst newChain)))
+                                                                             False => do sendToProcs "do not add" sock addrs
+                                                                                         pure (Just ("Consensus not reached; did not add node\n", chain))
+                                                                             True => do sendToProcs "add" sock addrs
+                                                                                        pure (Just ("Consensus reached; added node\n", (fst newChain)))
 
-executeCommandAlt chain "update" _ _ _ = pure (Just ("Attempting to sync chains\n", chain))
+executeCommandAlt chain "receive" "" sock addrs = do received <- recvFrom sock 2048
+                                                     case received of
+                                                          Left l => pure (Just ("Unable to receive message\n", chain))
+                                                          Right r => let recvStr = fst (snd r)
+                                                                         senderInfo = fst r
+                                                                         senderAddr = remote_addr senderInfo
+                                                                         senderPort = remote_port senderInfo
+                                                                     in case split (== '+') recvStr of
+                                                                             [newStr, nonceStr, hash] => let Just nonce = parseInteger nonceStr
+                                                                                                             newChain = addNodeAlt chain newStr nonce
+                                                                                                         in do case (hash == (bitsToStr (snd (snd newChain)))) of
+                                                                                                                    False => do success <- sendTo sock senderAddr senderPort "no"
+                                                                                                                                putStrLn ("Denying change")
+                                                                                                                    True => do success <- sendTo sock senderAddr senderPort "yes"
+                                                                                                                               putStrLn ("Accepting change")
+                                                                                                               received1 <- recvFrom sock 2048
+                                                                                                               case received1 of
+                                                                                                                    Left l1 => pure (Just ("Unable to receive message\n", chain))
+                                                                                                                    Right r1 => let recvStr = fst (snd r1)
+                                                                                                                                in case recvStr of
+                                                                                                                                        "add" => pure (Just ("Implementing change\n", (fst newChain)))
+                                                                                                                                        _ => pure (Just ("Discarding proposed change\n", chain))
+                                                                             _ => do sendTo sock senderAddr senderPort "no"
+                                                                                     pure (Just ("Denying change\n", chain))
 executeCommandAlt chain command newStr _ _ = pure (executeCommand chain command newStr)
 
 processInput : Blockchain -> String -> Maybe (String, Blockchain)
@@ -108,43 +136,14 @@ createAddrs [] = []
 createAddrs (x :: xs) = let curAddr = IPv4Addr 127 0 0 1
                         in (MkUDPAddrInfo curAddr x) :: createAddrs xs
 
-receiver : Socket -> PID -> (Process ProcessLib.receiverType () NoRequest Complete)
-receiver sock pid = do received <- Action (recvFrom sock 2048)
-                       case received of
-                            Left l => LoopFail (receiver sock pid)
-                            Right r => do (Respond pid (\msg => Pure ((fst r), (fst (snd r)))))
-                                          Loop (receiver sock pid)
-
-spawnProcesses : Vect n UDPAddrInfo -> Socket -> PID -> IO ()
-spawnProcesses [] sock myPid = pure ()
-spawnProcesses (x :: xs) sock myPid = do pid <- spawn (do run forever (receiver sock myPid)
-                                                          pure ())
-                                         spawnProcesses xs sock myPid
-
 processInputLoop : Socket -> Vect n UDPAddrInfo -> Blockchain -> (Process ProcessLib.clientType () NoRequest NoRequest)
-processInputLoop sock addrs chain = do foundPair <- Request 1
-                                       let addedStr = snd foundPair
-                                       let senderInfo = fst foundPair
-                                       if ((length addedStr) == 0)
-                                          then do Action (putStr "Command: ")
-                                                  command <- Action (getLine)
-                                                  pInput <- Action (processInputAlt chain command sock addrs)
-                                                  case pInput of
-                                                       Nothing => RespondToEnd (\msg => Pure ())
-                                                       Just x => do Action (putStr (fst x))
-                                                                    LoopNoReq (processInputLoop sock addrs (snd x))
-                                          else case split (== '+') addedStr of
-                                                    [newStr, hash] => let newChain = addNodeAlt chain newStr
-                                                                      in case (hash == (bitsToStr (snd newChain))) of
-                                                                              False => do Action (sendTo sock (remote_addr senderInfo) (remote_port senderInfo) "no")
-                                                                                          LoopNoReq (processInputLoop sock addrs chain)
-                                                                              True => do Action (sendTo sock (remote_addr senderInfo) (remote_port senderInfo) "yes")
-                                                                                         LoopNoReq (processInputLoop sock addrs (fst newChain))
-                                                    _ => do Action (sendTo sock (remote_addr senderInfo) (remote_port senderInfo) "no")
-                                                            LoopNoReq (processInputLoop sock addrs chain)
-
-{-infLoop : Int -> IO ()
-infLoop x = infLoop (1 + x)-}
+processInputLoop sock addrs chain = do Action (putStr "Command: ")
+                                       command <- Action (getLine)
+                                       pInput <- Action (processInputAlt chain command sock addrs)
+                                       case pInput of
+                                            Nothing => RespondToEnd (\msg => Pure ())
+                                            Just x => do Action (putStr (fst x))
+                                                         LoopNoReq (processInputLoop sock addrs (snd x))
 
 procMain : Vect n Int -> (Process NoRecv () NoRequest NoRequest)
 procMain [] = let genNumBits = the (Bits 128) (intToBits 1)
@@ -166,6 +165,5 @@ procMain (x :: xs) = let myAddr = IPv4Addr 127 0 0 1
                                               if (bindRet == 0)
                                                  then do Just loopPID <- SpawnClient (processInputLoop r udpAddrVect (CreateChain 1 [CreateNode 1 (fst foundPair) "Genesis Block" (intToBits 0) (snd foundPair)]))
                                                               | Nothing => Action (putStrLn "spawn failed")
-                                                         Action (spawnProcesses udpAddrVect r loopPID)
-                                                         --Action (infLoop 0)
+                                                         RequestToWait loopPID 1
                                                  else Action (putStrLn "bind failed")
