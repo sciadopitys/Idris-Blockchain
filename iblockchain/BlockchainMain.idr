@@ -44,27 +44,29 @@ findNonceAndHash nodeNumBits datumBits curNonce prev = let nonceBits =  the (Bit
                                                                False => findNonceAndHash nodeNumBits datumBits (curNonce + 1) prev --if not, try next nonce value
                                                                True => (curNonce, curHash) --if so, return nonce and obtained hash
 
-||| Adds a node containing the input string to the input blockchain, returning a pair of new blockchain with a pair of the found nonce and hash fields
+||| Adds a node containing the input string to the input blockchain, returning a pair of the new blockchain and the added node
 ||| @chain the original blockchain
 ||| @newStr the desired datum to be added to the blockchain
 ||| @start the the nonce to start at for the mining function
 partial --cannot be total due to use of findNonceAndHash
-addNodeAlt : (chain : Blockchain) -> (newStr : String) -> (start : Integer) -> (Blockchain, (Integer, Bits 128)) --
+addNodeAlt : (chain : Blockchain) -> (newStr : String) -> (start : Integer) -> (Blockchain, Node)
 addNodeAlt (CreateChain size chain) newStr start = let foundPair1 = addToChain chain start
                                                    in ((CreateChain (S size) (fst foundPair1)), (snd foundPair1)) where
                                                        partial --cannot be total due to use of findNonceAndHash
-                                                       addToChain : (Vect n Node) -> Integer -> ((Vect (S n) Node), (Integer, Bits 128)) --function to obtain the Node Vector representing the new blockchain
+                                                       addToChain : (Vect n Node) -> Integer -> ((Vect (S n) Node), Node) --function to obtain the Node Vector representing the new blockchain
                                                        addToChain [] y = let genNumBits = the (Bits 128) (intToBits 1) -- if blockchain is currently empty (should never happen), add genesis block
                                                                              genStrToInt = getIntRep (unpack "Genesis Block") 0
                                                                              genStrBits =  the (Bits 128) (intToBits genStrToInt)
                                                                              foundPair = findNonceAndHash genNumBits genStrBits 1 (intToBits 0)
-                                                                         in (([CreateNode 1 (fst foundPair) "Genesis Block" (intToBits 0) (snd foundPair)]), foundPair)
+                                                                             genNode = CreateNode 1 (fst foundPair) "Genesis Block" (intToBits 0) (snd foundPair)
+                                                                         in ([genNode], genNode)
                                                        addToChain [last] y = let curNumBits = the (Bits 128) (intToBits (toIntegerNat (S size))) --otherwise, convert number field of new node to Bits 128
                                                                                  newStrCharList = unpack newStr --convert desired string to Bits 128
                                                                                  newStrToInt = getIntRep newStrCharList 0
                                                                                  newStrBits =  the (Bits 128) (intToBits newStrToInt)
                                                                                  foundPair = findNonceAndHash curNumBits newStrBits y (hash last) --obtain nonce and hash fields
-                                                                              in ((last :: [CreateNode (S size) (fst foundPair) newStr (hash last) (snd foundPair)]), foundPair) --create new node and add to end of blockchain
+                                                                                 newNode = CreateNode (S size) (fst foundPair) newStr (hash last) (snd foundPair) --obtain new node
+                                                                              in ((last :: [newNode]), newNode) --add new node to end of blockchain
                                                        addToChain (x :: xs) y = ((x :: (fst (addToChain xs y))), (snd (addToChain xs y))) --traverse down blockchain
 
 ||| Adds a node containing the input string to the input blockchain, returning the new blockchain
@@ -72,7 +74,7 @@ addNodeAlt (CreateChain size chain) newStr start = let foundPair1 = addToChain c
 ||| @newStr the desired datum to be added to the blockchain
 partial --cannot be total due to use of findNonceAndHash
 addNode : (chain : Blockchain) -> (newStr : String) -> Blockchain
-addNode chain newStr = fst (addNodeAlt chain newStr 1) --simply call addNodeAlt function, returning desired element of returned pair
+addNode chain newStr = fst (addNodeAlt chain newStr 1) --simply call addNodeAlt function (starting with a nonce of 1), returning desired element of returned pair
 
 ||| Obtains a string representation of a blockchain, used for displaying a blockchain to the console
 display : Blockchain -> String
@@ -92,22 +94,20 @@ sendToProcs str sock (x :: xs) = do success <- sendTo sock (remote_addr x) (remo
                                          Left l => pure False --if unsuccessful, return failure
                                          Right r => sendToProcs str sock xs
 
-||| Waits for a specified amount confirmations of a node addition from collaborating processes, returning an IO Bool
+||| Waits for confirmation of a node addition from all collaborating processes, returning an IO Bool
 ||| @sock the current process's socket
 ||| @addrs a UDPAddrInfo Vector, where UDPAddrInfo is a record with address and port fields
-||| @count the necessary number of confirmations
-recvConf : (sock : Socket) -> (addrs : Vect n UDPAddrInfo) -> (count : Nat) -> (IO Bool)
-recvConf sock addrs Z = pure True --enough confirmations have been received; return success
-recvConf sock [] (S x) = pure False --not enough confirmations have been received; return failure
-recvConf sock (x :: xs) (S y) = do received <- recvFrom sock 2048 --wait for message
-                                   case received of
-                                        Left l => recvConf sock xs (S y) --error with received message
-                                        Right r => case (fst (snd r)) of --check whether received message was confirmation or not
+recvConf : (sock : Socket) -> (addrs : Vect n UDPAddrInfo) -> (IO Bool)
+recvConf sock [] = pure True --all confirmations have been received; return success
+recvConf sock (x :: xs) = do received <- recvFrom sock 2048 --wait for message
+                             case received of
+                                  Left l => do putStrLn "receive failed"
+                                               pure False --error with received message; return failure
+                                  Right r => case (fst (snd r)) of --check whether received message was confirmation or not
                                                         "yes" => do putStrLn "Acceptance received" --if a confirmation was received
-                                                                    recvConf sock xs y
-                                                        "no2" => pure False --if a denial due to wrong message format was received
-                                                        _ => do putStrLn "Denial received" --if any other denial was received
-                                                                recvConf sock xs (S y)
+                                                                    recvConf sock xs
+                                                        _ => do putStrLn "Denial received" --if a denial was received, return failure
+                                                                pure False
 ||| Obtains the last two elements of a Vector of nodes
 getLastNodes : Vect n Node -> IO (Maybe (Node, Node))
 getLastNodes [] = pure Nothing
@@ -157,18 +157,19 @@ executeCommand chain _ _ = Just ("Invalid command\n", chain) --all other command
 partial
 executeCommandAlt : (chain : Blockchain) -> (command : String) -> (newStr : String) -> (sock : Socket) -> (addrs : Vect n UDPAddrInfo) -> IO (Maybe (String, Blockchain))
 executeCommandAlt {n} chain "add" newStr sock addrs = let newStrAct = strTail(newStr)
-                                                          newChain = addNodeAlt chain newStrAct 1 --obtain new blockchain with added node
-                                                          foundPair = snd newChain
-                                                          sendStr = newStrAct ++ "+" ++ (show (fst foundPair)) ++ "+" ++ (bitsToStr (snd foundPair)) --send message about added node to other processes
+                                                          newChainPair = addNodeAlt chain newStrAct 1 --obtain new blockchain with added node
+                                                          newChain = fst newChainPair
+                                                          newNode = snd newChainPair
+                                                          sendStr = newStrAct ++ "+" ++ (show (node newNode)) ++ "+" ++ (show (nonce newNode)) ++ "+" ++ (bitsToStr (prevHash newNode)) ++ "+" ++ (bitsToStr (hash newNode)) --send message about added node to other processes
                                                       in do success <- sendToProcs sendStr sock addrs
                                                             case success of
                                                                  False => pure (Just ("Unable to send message; did not add node\n", chain)) --if unable to send message, revert to original blockchain
-                                                                 True => do consensus <- recvConf sock addrs ((divNatNZ n 2 SIsNotZ) + 1) --otherwise, attempt to obtain consensus from other nodes
+                                                                 True => do consensus <- recvConf sock addrs --otherwise, attempt to obtain consensus from other nodes
                                                                             case consensus of
                                                                                  False => do sendToProcs "do not add" sock addrs --consensus not reached; send message about reverting to original blockchain
                                                                                              pure (Just ("Consensus not reached; did not add node\n", chain))
                                                                                  True => do sendToProcs "add" sock addrs --consensus reached; send message about switching to new blockchain
-                                                                                            pure (Just ("Consensus reached; added node\n", (fst newChain)))
+                                                                                            pure (Just ("Consensus reached; added node\n", newChain))
 --to initiate consensus protocol
 executeCommandAlt chain "receive" "" sock addrs = do received <- recvFrom sock 2048 --receive message
                                                      case received of
@@ -178,42 +179,48 @@ executeCommandAlt chain "receive" "" sock addrs = do received <- recvFrom sock 2
                                                                          senderAddr = remote_addr senderInfo
                                                                          senderPort = remote_port senderInfo
                                                                      in case split (== '+') recvStr of
-                                                                             [newStr, nonceStr, hash] => let Just nonce = parseInteger nonceStr --obtain new blockchain with added node given specified nonce
-                                                                                                             newChain = addNodeAlt chain newStr nonce
-                                                                                                         in do case (hash == (bitsToStr (snd (snd newChain)))) of -- ensure that new node's hash matches specified hash
-                                                                                                                    False => do success <- sendTo sock senderAddr senderPort "no" --if not, send denial
-                                                                                                                                putStrLn ("Denying change")
-                                                                                                                    True => do success <- sendTo sock senderAddr senderPort "yes" --otherwise, send confirmation
-                                                                                                                               putStrLn ("Accepting change")
-                                                                                                               received1 <- recvFrom sock 2048 --receive another message from original sender
-                                                                                                               case received1 of
-                                                                                                                    Left l1 => pure (Just ("Unable to receive message\n", chain)) --if unable to receive message
-                                                                                                                    Right r1 => let recvStr = fst (snd r1)
-                                                                                                                                in case recvStr of
-                                                                                                                                        "add" => pure (Just ("Implementing change\n", (fst newChain))) --if message was "add", switch to new blockchain
-                                                                                                                                        _ => pure (Just ("Discarding proposed change\n", chain)) --otherwise, revert to original blockchain
-                                                                             _ => do sendTo sock senderAddr senderPort "no2" -- message received was in wrong format; send strong denial to sender
-                                                                                     received2 <- recvFrom sock 2048
-                                                                                     pure (Just ("Denying change\n", chain)) -- revert to original blockchain
+                                                                             [newStr, nodeNumStr, nonceStr, rightPHash, rightHash] => let nonceParse = parseInteger nonceStr
+                                                                                                                                      in case nonceParse of
+                                                                                                                                              Nothing => do success <- sendTo sock senderAddr senderPort "no" --message received was in wrong format; send denial to sender
+                                                                                                                                                            received3 <- recvFrom sock 2048
+                                                                                                                                                            pure (Just ("Incorrect format of message\n", chain)) -- revert to original blockchain
+                                                                                                                                              Just rightNonce => let newChainPair = addNodeAlt chain newStr rightNonce --obtain resultant blockchain from adding desired string and new added node
+                                                                                                                                                                     newNode = snd newChainPair
+                                                                                                                                                                 --confirm that all fields of new node are identical to those of corresponding node in sender's blockchain
+                                                                                                                                                                 in do case ((rightHash == (bitsToStr (hash newNode))) && ((rightPHash == (bitsToStr (prevHash newNode))) && ((rightNonce == (nonce newNode)) && (nodeNumStr == (show (node newNode)))))) of
+                                                                                                                                                                            False => do success <- sendTo sock senderAddr senderPort "no" --if not, send denial to sender
+                                                                                                                                                                                        putStrLn ("Denying change")
+                                                                                                                                                                            True => do success <- sendTo sock senderAddr senderPort "yes" --otherwise, send confirmation
+                                                                                                                                                                                       putStrLn ("Accepting change")
+                                                                                                                                                                       received1 <- recvFrom sock 2048 --receive another message from original sender
+                                                                                                                                                                       case received1 of
+                                                                                                                                                                            Left l => pure (Just ("Unable to receive message\n", chain)) --if unable to receive message
+                                                                                                                                                                            Right r => let recvStr = fst (snd r)
+                                                                                                                                                                                       in case recvStr of
+                                                                                                                                                                                               "add" => pure (Just ("Implementing change\n", (fst newChainPair))) --if message was "add", switch to new blockchain
+                                                                                                                                                                                               _ => pure (Just ("Discarding proposed change\n", chain)) --otherwise, revert to original blockchain
+                                                                             _ => do sendTo sock senderAddr senderPort "no" --message received was in wrong format; send denial to sender
+                                                                                     received3 <- recvFrom sock 2048
+                                                                                     pure (Just ("Incorrect format of message\n", chain)) -- revert to original blockchain
 executeCommandAlt chain "rock" "" sock addrs = if True then let rockToInt = getIntRep (unpack "rock") 0 --perform cryptographic hash of the string "rock"
                                                                 rockBits =  the (Bits 128) (intToBits rockToInt)
                                                                 rockHash = hashMessage dummyMD5 [rockBits]
                                                                 rockHashStr = bitsToStr rockHash --convert bits back into string
-                                                            in do putStrLn rockHashStr
+                                                            in do --putStrLn rockHashStr
                                                                   executeCommandAlt chain "add" (" " ++ rockHashStr) sock addrs --add hashed string to blockchain
                                                        else pure (Just ("Unable to play\n", chain)) --otherwise, retain original chain
 executeCommandAlt chain "paper" "" sock addrs = if True then let paperToInt = getIntRep (unpack "paper") 0 --perform cryptographic hash of the string "paper"
                                                                  paperBits =  the (Bits 128) (intToBits paperToInt)
                                                                  paperHash = hashMessage dummyMD5 [paperBits]
                                                                  paperHashStr = bitsToStr paperHash
-                                                             in do putStrLn paperHashStr
+                                                             in do --putStrLn paperHashStr
                                                                    executeCommandAlt chain "add" (" " ++ paperHashStr) sock addrs
                                                         else pure (Just ("Unable to play\n", chain))
 executeCommandAlt chain "scissors" "" sock addrs = if True then let sToInt = getIntRep (unpack "scissors") 0 --perform cryptographic hash of the string "scissors"
                                                                     sBits =  the (Bits 128) (intToBits sToInt)
                                                                     sHash = hashMessage dummyMD5 [sBits]
                                                                     sHashStr = bitsToStr sHash
-                                                                in do putStrLn sHashStr
+                                                                in do --putStrLn sHashStr
                                                                       executeCommandAlt chain "add" (" " ++ sHashStr) sock addrs
                                                            else pure (Just ("Unable to play\n", chain))
 executeCommandAlt chain "result" "" sock addrs = do lastNodesPair <- getLastNodes (act chain) -- get last two nodes of current blockchain
