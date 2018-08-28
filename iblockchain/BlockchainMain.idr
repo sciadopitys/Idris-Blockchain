@@ -1,5 +1,14 @@
 module BlockchainMain
 
+import Data.Vect
+import Data.Bits
+import ProcessLib
+import Data.Fin
+import System.Concurrency.Channels
+import Network.Socket
+import Data.Crypto.Hash.MD5
+import Data.Crypto.Hash
+
 %default total
 
 ||| record used to represent a block of a blockchain
@@ -14,11 +23,9 @@ record Block where
 Show Block where --implementation of show interface for block record
   show (CreateBlock block nonce dataField prevHash hash) = "\nBlock #: " ++ show block ++ "\nNonce: " ++ show nonce ++ "\nData: " ++ show dataField ++ "\nPrevious Hash: " ++ show prevHash ++ "\nHash: " ++ show hash
 
-||| record used to represent a blockchain
-record Blockchain where
-       constructor CreateChain
-       size : Nat
-       act : Vect size Block
+data VectSameOrInc : Type -> Type where
+     Same : (len : Nat) -> Vect len a -> VectSameOrInc a
+     Inc : (len : Nat) -> Vect (S len) a -> VectSameOrInc a
 
 ||| Obtain an Integer value given a list of chars
 getIntRep : List Char -> (acc : Int) -> Integer
@@ -40,39 +47,34 @@ findNonceAndHash blockNumBits datumBits curNonce prev = let nonceBits =  the (Bi
 ||| @newStr the desired datum to be added to the blockchain
 ||| @start the the nonce to start at for the mining function
 partial --cannot be total due to use of findNonceAndHash
-addBlockAlt : (chain : Blockchain) -> (newStr : String) -> (start : Integer) -> (Blockchain, Block)
-addBlockAlt (CreateChain size chain) newStr start = let foundPair1 = addToChain chain start
-                                                    in ((CreateChain (S size) (fst foundPair1)), (snd foundPair1)) where
-                                                       partial --cannot be total due to use of findNonceAndHash
-                                                       addToChain : (Vect n Block) -> Integer -> ((Vect (S n) Block), Block) --function to obtain the Block Vector representing the new blockchain
-                                                       addToChain [] y = let genNumBits = the (Bits 128) (intToBits 0) -- if blockchain is currently empty (should never happen), add genesis block
-                                                                             genStrToInt = getIntRep (unpack "Genesis Block") 0
-                                                                             genStrBits =  the (Bits 128) (intToBits genStrToInt)
-                                                                             foundPair = findNonceAndHash genNumBits genStrBits 1 (intToBits 0)
-                                                                             genBlock = CreateBlock 0 (fst foundPair) "Genesis Block" (intToBits 0) (snd foundPair)
-                                                                         in ([genBlock], genBlock)
-                                                       addToChain [last] y = let curNumBits = the (Bits 128) (intToBits (toIntegerNat size)) --otherwise, convert number field of new block to Bits 128
-                                                                                 newStrCharList = unpack newStr --convert desired string to Bits 128
-                                                                                 newStrToInt = getIntRep newStrCharList 0
-                                                                                 newStrBits =  the (Bits 128) (intToBits newStrToInt)
-                                                                                 foundPair = findNonceAndHash curNumBits newStrBits y (hash last) --obtain nonce and hash fields
-                                                                                 newBlock = CreateBlock size (fst foundPair) newStr (hash last) (snd foundPair) --obtain new block
-                                                                             in ((last :: [newBlock]), newBlock) --add new block to end of blockchain
-                                                       addToChain (x :: xs) y = ((x :: (fst (addToChain xs y))), (snd (addToChain xs y))) --traverse down blockchain
+addBlockAlt : (chain : Vect n Block) -> (newStr : String) -> (start : Integer) -> (size : Nat) -> (Vect (S n) Block, Block)
+addBlockAlt [] _ _ _ = let genNumBits = the (Bits 128) (intToBits 0) -- if blockchain is currently empty (should never happen), add genesis block
+                           genStrToInt = getIntRep (unpack "Genesis Block") 0
+                           genStrBits =  the (Bits 128) (intToBits genStrToInt)
+                           foundPair = findNonceAndHash genNumBits genStrBits 1 (intToBits 0)
+                           genBlock = CreateBlock 0 (fst foundPair) "Genesis Block" (intToBits 0) (snd foundPair)
+                       in ([genBlock], genBlock)
+addBlockAlt [last] newStr start size = let curNumBits = the (Bits 128) (intToBits (toIntegerNat size)) --otherwise, convert number field of new block to Bits 128
+                                           newStrCharList = unpack newStr --convert desired string to Bits 128
+                                           newStrToInt = getIntRep newStrCharList 0
+                                           newStrBits =  the (Bits 128) (intToBits newStrToInt)
+                                           foundPair = findNonceAndHash curNumBits newStrBits start (hash last) --obtain nonce and hash fields
+                                           newBlock = CreateBlock size (fst foundPair) newStr (hash last) (snd foundPair) --obtain new block
+                                       in ((last :: [newBlock]), newBlock) --add new block to end of blockchain
+addBlockAlt (x :: xs) newStr start size = let final = addBlockAlt xs newStr start size
+                                          in ((x :: (fst final)), (snd final)) --traverse down blockchain
 
 ||| Adds a block containing the input string to the input blockchain, returning the new blockchain
 ||| @chain the original blockchain
 ||| @newStr the desired datum to be added to the blockchain
 partial --cannot be total due to use of findNonceAndHash
-addBlock : (chain : Blockchain) -> (newStr : String) -> Blockchain
-addBlock chain newStr = fst (addBlockAlt chain newStr 1) --simply call addBlockAlt function (starting with a nonce of 1), returning desired element of returned pair
+addBlock : (chain : Vect n Block) -> (newStr : String) -> (size : Nat) -> Vect (S n) Block
+addBlock chain newStr size = fst (addBlockAlt chain newStr 1 size) --simply call addBlockAlt function (starting with a nonce of 1), returning desired element of returned pair
 
 ||| Obtains a string representation of a blockchain, used for displaying a blockchain to the console
-display : Blockchain -> String
-display (CreateChain size chain) = displayChain chain where
-    displayChain : Vect size1 Block -> String
-    displayChain [] = "\n"
-    displayChain (x :: xs) = show x ++ "\n" ++ displayChain xs
+display : Vect n Block -> String
+display [] = "\n"
+display (x :: xs) = show x ++ "\n" ++ display xs
 
 ||| Function to ensure that a specified message is successfully sent over a socket
 partial --cannot be total due to potential for infinite recursion
@@ -163,11 +165,12 @@ recvCont sock len = do success <- recvFrom sock len
 ||| @command the desired command
 ||| @newStr the string to be added to the blockchain; relevant for the "add" command
 partial
-executeCommand : (chain : Blockchain) -> (command : String) -> (newStr : String) -> Maybe (String, Blockchain)
-executeCommand chain "add" newStr = Just ("Added new block\n", addBlock chain (strTail(newStr))) --add a block to end of the blockchian
-executeCommand chain "display" "" = Just ((display chain), chain) --display current blockchain to console
-executeCommand chain "quit" "" = Nothing --exit replWith loop
-executeCommand chain _ _ = Just ("Invalid command\n", chain) --all other commands are invalid
+executeCommand : (chain : Vect m Block) -> (command : String) -> (newStr : String) -> Maybe (String, VectSameOrInc Block)
+executeCommand {m} chain "add" newStr = let newChain = addBlock chain (strTail(newStr)) m
+                                        in Just ("Added new block\n", (Inc m newChain)) --add a block to end of the blockchian
+executeCommand {m} chain "display" "" = Just ((display chain), (Same m chain)) --display current blockchain to console
+executeCommand {m} chain "quit" "" = Nothing --exit replWith loop
+executeCommand {m} chain _ _ = Just ("Invalid command\n", (Same m chain)) --all other commands are invalid
 
 ||| executes a desired command on a blockchain; used for distributed blockchain simulation
 ||| @chain the current blockchain
@@ -177,35 +180,35 @@ executeCommand chain _ _ = Just ("Invalid command\n", chain) --all other command
 ||| @addrs a UDPAddrInfo Vector, where UDPAddrInfo is a record with address and port fields
 ||| @port the port the current process is bound to
 partial
-executeCommandAlt : (chain : Blockchain) -> (command : String) -> (newStr : String) -> (sock : Socket) -> (addrs : Vect n UDPAddrInfo) -> (port : Int) -> IO (Maybe (String, Blockchain))
-executeCommandAlt {n} chain "add" newStr sock addrs _ = let newStrAct = strTail(newStr)
-                                                            newChainPair = addBlockAlt chain newStrAct 1 --obtain new blockchain with added block
-                                                            newChain = fst newChainPair
-                                                            newBlock = snd newChainPair
-                                                            sendStr = newStrAct ++ "+" ++ (show (block newBlock)) ++ "+" ++ (show (nonce newBlock)) ++ "+" ++ (bitsToStr (prevHash newBlock)) ++ "+" ++ (bitsToStr (hash newBlock)) --send message about added block to other processes
-                                                        in do success <- sendToProcs sendStr sock addrs
-                                                              case success of
-                                                                   False => pure (Just ("Unable to send message; did not add block\n", chain)) --if unable to send message, revert to original blockchain
-                                                                   True => do consensus <- recvConf sock addrs True --otherwise, attempt to obtain consensus from other blocks
-                                                                              case consensus of
-                                                                                   False => do sendToProcs "do not add" sock addrs --consensus not reached; send message about reverting to original blockchain
-                                                                                               pure (Just ("Consensus not reached; did not add block\n", chain))
-                                                                                   True => do sendToProcs "add" sock addrs --consensus reached; send message about switching to new blockchain
-                                                                                              pure (Just ("Consensus reached; added block\n", newChain))
+executeCommandAlt : (chain : Vect m Block) -> (command : String) -> (newStr : String) -> (sock : Socket) -> (addrs : Vect n UDPAddrInfo) -> (port : Int) -> IO (Maybe (String, VectSameOrInc Block))
+executeCommandAlt {m} {n} chain "add" newStr sock addrs _ = let newStrAct = strTail(newStr)
+                                                                newChainPair = addBlockAlt chain newStrAct 1 m--obtain new blockchain with added block
+                                                                newChain = fst newChainPair
+                                                                newBlock = snd newChainPair
+                                                                sendStr = newStrAct ++ "+" ++ (show (block newBlock)) ++ "+" ++ (show (nonce newBlock)) ++ "+" ++ (bitsToStr (prevHash newBlock)) ++ "+" ++ (bitsToStr (hash newBlock)) --send message about added block to other processes
+                                                            in do success <- sendToProcs sendStr sock addrs
+                                                                  case success of
+                                                                       False => pure (Just ("Unable to send message; did not add block\n", (Same m chain))) --if unable to send message, revert to original blockchain
+                                                                       True => do consensus <- recvConf sock addrs True --otherwise, attempt to obtain consensus from other blocks
+                                                                                  case consensus of
+                                                                                       False => do sendToProcs "do not add" sock addrs --consensus not reached; send message about reverting to original blockchain
+                                                                                                   pure (Just ("Consensus not reached; did not add block\n", (Same m chain)))
+                                                                                       True => do sendToProcs "add" sock addrs --consensus reached; send message about switching to new blockchain
+                                                                                                  pure (Just ("Consensus reached; added block\n", (Inc m newChain)))
 --to initiate consensus protocol
-executeCommandAlt chain "receive" "" sock addrs _ = do received <- recvCont sock 2048 --receive message
-                                                       let recvStr = fst (snd received) --bind info from received message to names
-                                                       let senderInfo = fst received
-                                                       let senderAddr = remote_addr senderInfo
-                                                       let senderPort = remote_port senderInfo
-                                                       case split (== '+') recvStr of
-                                                            [newStr, blockNumStr, nonceStr, rightPHash, rightHash] => let nonceParse = parseInteger nonceStr
-                                                                                                                      in case nonceParse of
-                                                                                                                              Nothing => do sendCont sock senderAddr senderPort "no" --message received was in wrong format; send denial to sender
-                                                                                                                                            received2 <- recvFrom sock 2048
-                                                                                                                                            pure (Just ("Incorrect format of message\n", chain)) -- revert to original blockchain
-                                                                                                                              Just rightNonce => let newChainPair = addBlockAlt chain newStr rightNonce --obtain resultant blockchain from adding desired string and new added block
-                                                                                                                                                     newBlock = snd newChainPair
+executeCommandAlt {m} chain "receive" "" sock addrs _ = do received <- recvCont sock 2048 --receive message
+                                                           let recvStr = fst (snd received) --bind info from received message to names
+                                                           let senderInfo = fst received
+                                                           let senderAddr = remote_addr senderInfo
+                                                           let senderPort = remote_port senderInfo
+                                                           case split (== '+') recvStr of
+                                                                [newStr, blockNumStr, nonceStr, rightPHash, rightHash] => let nonceParse = parseInteger nonceStr
+                                                                                                                          in case nonceParse of
+                                                                                                                                  Nothing => do sendCont sock senderAddr senderPort "no" --message received was in wrong format; send denial to sender
+                                                                                                                                                received2 <- recvFrom sock 2048
+                                                                                                                                                pure (Just ("Incorrect format of message\n", (Same m chain))) -- revert to original blockchain
+                                                                                                                                  Just rightNonce => let newChainPair = addBlockAlt chain newStr rightNonce m --obtain resultant blockchain from adding desired string and new added block
+                                                                                                                                                         newBlock = snd newChainPair
                                                                                                                                                  --confirm that all fields of new block are identical to those of corresponding block in sender's blockchain
                                                                                                                                                  in do case ((rightHash == (bitsToStr (hash newBlock))) && ((rightPHash == (bitsToStr (prevHash newBlock))) && ((rightNonce == (nonce newBlock)) && (blockNumStr == (show (block newBlock)))))) of
                                                                                                                                                             False => do sendCont sock senderAddr senderPort "no" --if not, send denial to sender
@@ -215,120 +218,123 @@ executeCommandAlt chain "receive" "" sock addrs _ = do received <- recvCont sock
                                                                                                                                                        received1 <- recvCont sock 2048 --receive another message from original sender
                                                                                                                                                        let recvStr = fst (snd received1)
                                                                                                                                                        case recvStr of
-                                                                                                                                                            "add" => pure (Just ("Implementing change\n", (fst newChainPair))) --if message was "add", switch to new blockchain
-                                                                                                                                                            _ => pure (Just ("Discarding proposed change\n", chain)) --otherwise, revert to original blockchain
-                                                            _ => do sendCont sock senderAddr senderPort "no" --message received was in wrong format; send denial to sender
-                                                                    received3 <- recvFrom sock 2048
-                                                                    pure (Just ("Incorrect format of message\n", chain)) -- revert to original blockchain
-executeCommandAlt chain "rock" commit sock addrs port = let lastBlock = getLastBlock (act chain) --obtain last block of current chain
-                                                        in do case lastBlock of
-                                                                   Nothing => pure (Just ("Genesis block not found", addBlock chain "Genesis Block" )) --chain is currently empty (should never happen); add genesis block
-                                                                   Just x => let lastStr = dataField x --otherwise, get datum field of last block
-                                                                             in do case split (== '*') lastStr of
-                                                                                        [player, lastCommit, hashedPlay] => case (player == (show port)) of --last string has format of a RPS play, determine if current process made last play
-                                                                                                                                 True => pure (Just ("Cannot play both sides of a game\n", chain)) --if so, disregared new play
-                                                                                                                                 False => do play <- isPlay hashedPlay lastCommit --if not, confirm that last string does represent a RPS play
-                                                                                                                                             case (fst play) of
-                                                                                                                                                  --last string added doesn't represent a RPS play, add specified play to blobkchain
-                                                                                                                                                  False => let commitParse = parseInteger commit --determine if commit string represents an integer
-                                                                                                                                                           in case commitParse of
-                                                                                                                                                                   Nothing => pure (Just ("Commit value not an integer\n", chain)) --if not, revert to original blockchain
-                                                                                                                                                                   Just commitInt => let playToInt = getIntRep (unpack "rock") 0 --otherwise, perform cryptographic hash of the specified string along with given commit value
-                                                                                                                                                                                         playBits =  the (Bits 128) (intToBits playToInt)
-                                                                                                                                                                                         commitBits = the (Bits 128) (intToBits commitInt)
-                                                                                                                                                                                         playHash = hashMessage dummyMD5 [playBits, commitBits]
-                                                                                                                                                                                         playHashStr = bitsToStr playHash --convert output bits back into string
-                                                                                                                                                                                     in executeCommandAlt chain "add" (" " ++ (show port) ++ "*" ++ commit ++ "*" ++ playHashStr) sock addrs port --add port number, commit value, and hashed string to blockchain
-                                                                                                                                                  True => let winner = getWinner (snd play) 0 --a game was played, determine winner
-                                                                                                                                                          in case winner of
-                                                                                                                                                                  0 => executeCommandAlt chain "add" (" Players (" ++ player ++ ", " ++ (show port) ++ ") Tied") sock addrs port
-                                                                                                                                                                  1 => executeCommandAlt chain "add" (" Player 1 (" ++ player ++ ") Won") sock addrs port
-                                                                                                                                                                  2 => executeCommandAlt chain "add" (" Player 2 (" ++ (show port) ++ ") Won") sock addrs port
-                                                                                                                                                                  _ => pure (Just ("Unable to determine winner\n", chain))
-                                                                                        _ => let commitParse = parseInteger commit
-                                                                                             in case commitParse of
-                                                                                                     Nothing => pure (Just ("Commit value not an integer\n", chain))
-                                                                                                     Just commitInt => let playToInt = getIntRep (unpack "rock") 0
-                                                                                                                           playBits =  the (Bits 128) (intToBits playToInt)
-                                                                                                                           commitBits = the (Bits 128) (intToBits commitInt)
-                                                                                                                           playHash = hashMessage dummyMD5 [playBits, commitBits]
-                                                                                                                           playHashStr = bitsToStr playHash
-                                                                                                                       in executeCommandAlt chain "add" (" " ++ (show port) ++ "*" ++ commit ++ "*" ++ playHashStr) sock addrs port
-executeCommandAlt chain "paper" commit sock addrs port = let lastBlock = getLastBlock (act chain)
-                                                         in do case lastBlock of
-                                                                    Nothing => pure (Just ("Genesis block not found", addBlock chain "Genesis Block" ))
-                                                                    Just x => let lastStr = dataField x
-                                                                              in do case split (== '*') lastStr of
-                                                                                         [player, lastCommit, hashedPlay] => case (player == (show port)) of
-                                                                                                                                  True => pure (Just ("Cannot play both sides of a game\n", chain))
-                                                                                                                                  False => do play <- isPlay hashedPlay lastCommit
-                                                                                                                                              case (fst play) of
-                                                                                                                                                   False => let commitParse = parseInteger commit
-                                                                                                                                                            in case commitParse of
-                                                                                                                                                                    Nothing => pure (Just ("Commit value not an integer\n", chain))
-                                                                                                                                                                    Just commitInt => let playToInt = getIntRep (unpack "paper") 0
-                                                                                                                                                                                          playBits =  the (Bits 128) (intToBits playToInt)
-                                                                                                                                                                                          commitBits = the (Bits 128) (intToBits commitInt)
-                                                                                                                                                                                          playHash = hashMessage dummyMD5 [playBits, commitBits]
-                                                                                                                                                                                          playHashStr = bitsToStr playHash
-                                                                                                                                                                                      in executeCommandAlt chain "add" (" " ++ (show port) ++ "*" ++ commit ++ "*" ++ playHashStr) sock addrs port
-                                                                                                                                                   True => let winner = getWinner (snd play) 1
-                                                                                                                                                           in case winner of
-                                                                                                                                                                   0 => executeCommandAlt chain "add" (" Players (" ++ player ++ ", " ++ (show port) ++ ") Tied") sock addrs port
-                                                                                                                                                                   1 => executeCommandAlt chain "add" (" Player 1 (" ++ player ++ ") Won") sock addrs port
-                                                                                                                                                                   2 => executeCommandAlt chain "add" (" Player 2 (" ++ (show port) ++ ") Won") sock addrs port
-                                                                                                                                                                   _ => pure (Just ("Unable to determine winner\n", chain))
-                                                                                         _ => let commitParse = parseInteger commit
-                                                                                              in case commitParse of
-                                                                                                      Nothing => pure (Just ("Commit value not an integer\n", chain))
-                                                                                                      Just commitInt => let playToInt = getIntRep (unpack "paper") 0
-                                                                                                                            playBits =  the (Bits 128) (intToBits playToInt)
-                                                                                                                            commitBits = the (Bits 128) (intToBits commitInt)
-                                                                                                                            playHash = hashMessage dummyMD5 [playBits, commitBits]
-                                                                                                                            playHashStr = bitsToStr playHash
-                                                                                                                        in executeCommandAlt chain "add" (" " ++ (show port) ++ "*" ++ commit ++ "*" ++ playHashStr) sock addrs port
-executeCommandAlt chain "scissors" commit sock addrs port = let lastBlock = getLastBlock (act chain)
+                                                                                                                                                            "add" => pure (Just ("Implementing change\n", (Inc m (fst newChainPair)))) --if message was "add", switch to new blockchain
+                                                                                                                                                            _ => pure (Just ("Discarding proposed change\n", (Same m chain))) --otherwise, revert to original blockchain
+                                                                _ => do sendCont sock senderAddr senderPort "no" --message received was in wrong format; send denial to sender
+                                                                        received3 <- recvFrom sock 2048
+                                                                        pure (Just ("Incorrect format of message\n", (Same m chain))) -- revert to original blockchain
+executeCommandAlt {m} chain "rock" commit sock addrs port = let lastBlock = getLastBlock chain --obtain last block of current chain
                                                             in do case lastBlock of
-                                                                       Nothing => pure (Just ("Genesis block not found", addBlock chain "Genesis Block" ))
-                                                                       Just x => let lastStr = dataField x
+                                                                       Nothing => let genChain = addBlock chain "Genesis Block" m --chain is currently empty (should never happen); add genesis block
+                                                                                  in pure (Just ("Genesis block not found", (Inc m genChain)))
+                                                                       Just x => let lastStr = dataField x --otherwise, get datum field of last block
                                                                                  in do case split (== '*') lastStr of
-                                                                                            [player, lastCommit, hashedPlay] => case (player == (show port)) of
-                                                                                                                                     True => pure (Just ("Cannot play both sides of a game\n", chain))
-                                                                                                                                     False => do play <- isPlay hashedPlay lastCommit
+                                                                                            [player, lastCommit, hashedPlay] => case (player == (show port)) of --last string has format of a RPS play, determine if current process made last play
+                                                                                                                                     True => pure (Just ("Cannot play both sides of a game\n", (Same m chain))) --if so, disregared new play
+                                                                                                                                     False => do play <- isPlay hashedPlay lastCommit --if not, confirm that last string does represent a RPS play
                                                                                                                                                  case (fst play) of
-                                                                                                                                                      False => let commitParse = parseInteger commit
+                                                                                                                                                      --last string added doesn't represent a RPS play, add specified play to blobkchain
+                                                                                                                                                      False => let commitParse = parseInteger commit --determine if commit string represents an integer
                                                                                                                                                                in case commitParse of
-                                                                                                                                                                       Nothing => pure (Just ("Commit value not an integer\n", chain))
-                                                                                                                                                                       Just commitInt => let playToInt = getIntRep (unpack "scissors") 0
+                                                                                                                                                                       Nothing => pure (Just ("Commit value not an integer\n", (Same m chain))) --if not, revert to original blockchain
+                                                                                                                                                                       Just commitInt => let playToInt = getIntRep (unpack "rock") 0 --otherwise, perform cryptographic hash of the specified string along with given commit value
                                                                                                                                                                                              playBits =  the (Bits 128) (intToBits playToInt)
                                                                                                                                                                                              commitBits = the (Bits 128) (intToBits commitInt)
                                                                                                                                                                                              playHash = hashMessage dummyMD5 [playBits, commitBits]
-                                                                                                                                                                                             playHashStr = bitsToStr playHash
-                                                                                                                                                                                         in executeCommandAlt chain "add" (" " ++ (show port) ++ "*" ++ commit ++ "*" ++ playHashStr) sock addrs port
-                                                                                                                                                      True => let winner = getWinner (snd play) 2
+                                                                                                                                                                                             playHashStr = bitsToStr playHash --convert output bits back into string
+                                                                                                                                                                                         in executeCommandAlt chain "add" (" " ++ (show port) ++ "*" ++ commit ++ "*" ++ playHashStr) sock addrs port --add port number, commit value, and hashed string to blockchain
+                                                                                                                                                      True => let winner = getWinner (snd play) 0 --a game was played, determine winner
                                                                                                                                                               in case winner of
                                                                                                                                                                       0 => executeCommandAlt chain "add" (" Players (" ++ player ++ ", " ++ (show port) ++ ") Tied") sock addrs port
                                                                                                                                                                       1 => executeCommandAlt chain "add" (" Player 1 (" ++ player ++ ") Won") sock addrs port
                                                                                                                                                                       2 => executeCommandAlt chain "add" (" Player 2 (" ++ (show port) ++ ") Won") sock addrs port
-                                                                                                                                                                      _ => pure (Just ("Unable to determine winner\n", chain))
+                                                                                                                                                                      _ => pure (Just ("Unable to determine winner\n", (Same m chain)))
                                                                                             _ => let commitParse = parseInteger commit
                                                                                                  in case commitParse of
-                                                                                                         Nothing => pure (Just ("Commit value not an integer\n", chain))
-                                                                                                         Just commitInt => let playToInt = getIntRep (unpack "scissors") 0
+                                                                                                         Nothing => pure (Just ("Commit value not an integer\n", (Same m chain)))
+                                                                                                         Just commitInt => let playToInt = getIntRep (unpack "rock") 0
                                                                                                                                playBits =  the (Bits 128) (intToBits playToInt)
                                                                                                                                commitBits = the (Bits 128) (intToBits commitInt)
                                                                                                                                playHash = hashMessage dummyMD5 [playBits, commitBits]
                                                                                                                                playHashStr = bitsToStr playHash
                                                                                                                            in executeCommandAlt chain "add" (" " ++ (show port) ++ "*" ++ commit ++ "*" ++ playHashStr) sock addrs port
+executeCommandAlt {m} chain "paper" commit sock addrs port = let lastBlock = getLastBlock chain
+                                                             in do case lastBlock of
+                                                                        Nothing => let genChain = addBlock chain "Genesis Block" m --chain is currently empty (should never happen); add genesis block
+                                                                                   in pure (Just ("Genesis block not found", (Inc m genChain)))
+                                                                        Just x => let lastStr = dataField x
+                                                                                  in do case split (== '*') lastStr of
+                                                                                             [player, lastCommit, hashedPlay] => case (player == (show port)) of
+                                                                                                                                      True => pure (Just ("Cannot play both sides of a game\n", (Same m chain)))
+                                                                                                                                      False => do play <- isPlay hashedPlay lastCommit
+                                                                                                                                                  case (fst play) of
+                                                                                                                                                       False => let commitParse = parseInteger commit
+                                                                                                                                                                in case commitParse of
+                                                                                                                                                                        Nothing => pure (Just ("Commit value not an integer\n", (Same m chain)))
+                                                                                                                                                                        Just commitInt => let playToInt = getIntRep (unpack "paper") 0
+                                                                                                                                                                                              playBits =  the (Bits 128) (intToBits playToInt)
+                                                                                                                                                                                              commitBits = the (Bits 128) (intToBits commitInt)
+                                                                                                                                                                                              playHash = hashMessage dummyMD5 [playBits, commitBits]
+                                                                                                                                                                                              playHashStr = bitsToStr playHash
+                                                                                                                                                                                          in executeCommandAlt chain "add" (" " ++ (show port) ++ "*" ++ commit ++ "*" ++ playHashStr) sock addrs port
+                                                                                                                                                       True => let winner = getWinner (snd play) 1
+                                                                                                                                                               in case winner of
+                                                                                                                                                                       0 => executeCommandAlt chain "add" (" Players (" ++ player ++ ", " ++ (show port) ++ ") Tied") sock addrs port
+                                                                                                                                                                       1 => executeCommandAlt chain "add" (" Player 1 (" ++ player ++ ") Won") sock addrs port
+                                                                                                                                                                       2 => executeCommandAlt chain "add" (" Player 2 (" ++ (show port) ++ ") Won") sock addrs port
+                                                                                                                                                                       _ => pure (Just ("Unable to determine winner\n", (Same m chain)))
+                                                                                             _ => let commitParse = parseInteger commit
+                                                                                                  in case commitParse of
+                                                                                                          Nothing => pure (Just ("Commit value not an integer\n", (Same m chain)))
+                                                                                                          Just commitInt => let playToInt = getIntRep (unpack "paper") 0
+                                                                                                                                playBits =  the (Bits 128) (intToBits playToInt)
+                                                                                                                                commitBits = the (Bits 128) (intToBits commitInt)
+                                                                                                                                playHash = hashMessage dummyMD5 [playBits, commitBits]
+                                                                                                                                playHashStr = bitsToStr playHash
+                                                                                                                            in executeCommandAlt chain "add" (" " ++ (show port) ++ "*" ++ commit ++ "*" ++ playHashStr) sock addrs port
+executeCommandAlt {m} chain "scissors" commit sock addrs port = let lastBlock = getLastBlock chain
+                                                                in do case lastBlock of
+                                                                           Nothing => let genChain = addBlock chain "Genesis Block" m --chain is currently empty (should never happen); add genesis block
+                                                                                      in pure (Just ("Genesis block not found", (Inc m genChain)))
+                                                                           Just x => let lastStr = dataField x
+                                                                                     in do case split (== '*') lastStr of
+                                                                                                [player, lastCommit, hashedPlay] => case (player == (show port)) of
+                                                                                                                                         True => pure (Just ("Cannot play both sides of a game\n", (Same m chain)))
+                                                                                                                                         False => do play <- isPlay hashedPlay lastCommit
+                                                                                                                                                     case (fst play) of
+                                                                                                                                                          False => let commitParse = parseInteger commit
+                                                                                                                                                                   in case commitParse of
+                                                                                                                                                                           Nothing => pure (Just ("Commit value not an integer\n", (Same m chain)))
+                                                                                                                                                                           Just commitInt => let playToInt = getIntRep (unpack "scissors") 0
+                                                                                                                                                                                                 playBits =  the (Bits 128) (intToBits playToInt)
+                                                                                                                                                                                                 commitBits = the (Bits 128) (intToBits commitInt)
+                                                                                                                                                                                                 playHash = hashMessage dummyMD5 [playBits, commitBits]
+                                                                                                                                                                                                 playHashStr = bitsToStr playHash
+                                                                                                                                                                                             in executeCommandAlt chain "add" (" " ++ (show port) ++ "*" ++ commit ++ "*" ++ playHashStr) sock addrs port
+                                                                                                                                                          True => let winner = getWinner (snd play) 2
+                                                                                                                                                                  in case winner of
+                                                                                                                                                                          0 => executeCommandAlt chain "add" (" Players (" ++ player ++ ", " ++ (show port) ++ ") Tied") sock addrs port
+                                                                                                                                                                          1 => executeCommandAlt chain "add" (" Player 1 (" ++ player ++ ") Won") sock addrs port
+                                                                                                                                                                          2 => executeCommandAlt chain "add" (" Player 2 (" ++ (show port) ++ ") Won") sock addrs port
+                                                                                                                                                                          _ => pure (Just ("Unable to determine winner\n", (Same m chain)))
+                                                                                                _ => let commitParse = parseInteger commit
+                                                                                                     in case commitParse of
+                                                                                                             Nothing => pure (Just ("Commit value not an integer\n", (Same m chain)))
+                                                                                                             Just commitInt => let playToInt = getIntRep (unpack "scissors") 0
+                                                                                                                                   playBits =  the (Bits 128) (intToBits playToInt)
+                                                                                                                                   commitBits = the (Bits 128) (intToBits commitInt)
+                                                                                                                                   playHash = hashMessage dummyMD5 [playBits, commitBits]
+                                                                                                                                   playHashStr = bitsToStr playHash
+                                                                                                                               in executeCommandAlt chain "add" (" " ++ (show port) ++ "*" ++ commit ++ "*" ++ playHashStr) sock addrs port
 executeCommandAlt chain command newStr _ _ _ = pure (executeCommand chain command newStr) -- all other commands executed by calling executeCommand
 
 ||| processes user input by calling executeCommand; used for single blockchain simulation
 ||| @chain the current blockchain
 ||| @input the user input string
 partial
-processInput : (chain : Blockchain) -> (input : String) -> Maybe (String, Blockchain)
-processInput chain input = case span (/= ' ') input of --split input into two strings if possible
-                                (command, newStr) => executeCommand chain command newStr
+processInput : (chain : Vect m Block) -> (input : String) -> Maybe (String, VectSameOrInc Block)
+processInput {m} chain input = case span (/= ' ') input of
+                                    (command, newStr) => executeCommand chain command newStr
 
 ||| processes user input by calling executeCommand; used for distributed blockchain simulation
 ||| @chain the current blockchain
@@ -337,7 +343,7 @@ processInput chain input = case span (/= ' ') input of --split input into two st
 ||| @addrs a UDPAddrInfo Vector, where UDPAddrInfo is a record with address and port fields
 ||| @port the port the current process is bound to
 partial
-processInputAlt : (chain : Blockchain) -> (input : String) -> (sock : Socket) -> (addrs : Vect n UDPAddrInfo) -> (port : Int) -> IO (Maybe (String, Blockchain))
+processInputAlt : (chain : Vect m Block) -> (input : String) -> (sock : Socket) -> (addrs : Vect n UDPAddrInfo) -> (port : Int) -> IO (Maybe (String, VectSameOrInc Block))
 processInputAlt chain input sock addrs port = case span (/= ' ') input of
                                                    (command, newStr) => executeCommandAlt chain command newStr sock addrs port
 
@@ -354,14 +360,32 @@ createAddrs (x :: xs) = let curAddr = IPv4Addr 127 0 0 1 --create localhost IPv4
 ||| @chain the current blockchain
 ||| @port the port the current process is bound to
 partial
-processInputLoop : (sock : Socket) -> (addrs : Vect n UDPAddrInfo) -> (chain : Blockchain) -> (port : Int) -> (Process ProcessLib.clientType () NoRequest NoRequest)
-processInputLoop sock addrs chain port = do Action (putStr "Command: ") --prompt user for input
-                                            command <- Action (getLine) --obtain input
-                                            pInput <- Action (processInputAlt chain command sock addrs port) --process input by calling processInputAlt
-                                            case pInput of
-                                                 Nothing => RespondToEnd (\msg => Pure ()) --if user has specified "quit" command, respond to main Process to end program
-                                                 Just x => do Action (putStr (fst x)) --otherwise, call new iteration of process
-                                                              LoopNoReq (processInputLoop sock addrs (snd x) port)
+processInputLoop : (sock : Socket) -> (addrs : Vect m UDPAddrInfo) -> (chain : Vect n Block) -> (port : Int) -> (Process ProcessLib.clientType () NoRequest NoRequest)
+processInputLoop {n} sock addrs chain port = do Action (putStr "Command: ") --prompt user for input
+                                                command <- Action (getLine) --obtain input
+                                                pInput <- Action (processInputAlt chain command sock addrs port) --process input by calling processInputAlt
+                                                case pInput of
+                                                     Nothing => RespondToEnd (\msg => Pure ()) --if user has specified "quit" command, respond to main Process to end program
+                                                     Just x => do Action (putStr (fst x)) --otherwise, call new iteration of process
+                                                                  case (snd x) of --obtain vector from VectSameOrInc
+                                                                       (Same n vect) => LoopNoReq (processInputLoop sock addrs vect port) --if chain remained the same
+                                                                       (Inc n vect) => LoopNoReq (processInputLoop sock addrs vect port) --if a new block was added
+                                                                       _ => RespondToEnd (\msg => Pure ()) --an unexpected deletion of a block has occurred, end program
+
+||| Process that simulates replWith loop; used for simple blockchain simulation
+||| @chain the current blockchain
+partial
+processInputLoopSimp : (chain : Vect n Block) -> (Process ProcessLib.clientType () NoRequest NoRequest)
+processInputLoopSimp {n} chain = do Action (putStr "Command: ")
+                                    command <- Action (getLine)
+                                    let pInput = processInput chain command --process input by calling processInput
+                                    case pInput of
+                                         Nothing => RespondToEnd (\msg => Pure ())
+                                         Just x => do Action (putStr (fst x))
+                                                      case (snd x) of
+                                                           (Same n vect) => LoopNoReq (processInputLoopSimp vect)
+                                                           (Inc n vect) => LoopNoReq (processInputLoopSimp vect)
+                                                           _ => RespondToEnd (\msg => Pure ())
 
 ||| Main process; performs initialization of necessary variables and blockchain itself (adds genesis block)
 ||| @ ports a Vector of ints representing port numbers
@@ -371,7 +395,9 @@ procMain [] = let genNumBits = the (Bits 128) (intToBits 0) --create
                   genStrToInt = getIntRep (unpack "Genesis Block") 0
                   genStrBits =  the (Bits 128) (intToBits genStrToInt)
                   foundPair = findNonceAndHash genNumBits genStrBits 1 (intToBits 0)
-              in Action (replWith (CreateChain 1 [CreateBlock 0 (fst foundPair) "Genesis Block" (intToBits 0) (snd foundPair)]) "Command: " processInput) --single blockchain simulation using replWith
+              in do Just loopPID <- SpawnClient (processInputLoopSimp [CreateBlock 0 (fst foundPair) "Genesis Block" (intToBits 0) (snd foundPair)]) --spawn processInputLoopSimp process (simple blockchain simulation)
+                         | Nothing => Action (putStrLn "spawn failed") --if unable to spawn new process
+                    RequestToWait loopPID 1 --wait for looping process to respond and finish
 procMain [x] = Action (putStrLn "Must specify more than 1 port number") --ports Vector must have more than 1 element (or none)
 procMain (x :: xs) = let myAddr = IPv4Addr 127 0 0 1 --create localhost IPv4 addr for this process
                          udpAddrVect = createAddrs xs --obtain UDPAddrInfo Vector based on specified Vector of port numbers
@@ -384,7 +410,7 @@ procMain (x :: xs) = let myAddr = IPv4Addr 127 0 0 1 --create localhost IPv4 add
                                 Left l => Action (putStrLn "socket failed") --if socket creation was unsuccessful
                                 Right r => do bindRet <- Action (bind r (Just myAddr) x) --otherwise, bind socket to this process's addr and port
                                               if (bindRet == 0)
-                                                 then do Just loopPID <- SpawnClient (processInputLoop r udpAddrVect (CreateChain 1 [CreateBlock 0 (fst foundPair) "Genesis Block" (intToBits 0) (snd foundPair)]) x) --spawn processInputLoop process, passing bound socket (distributed blockchain simulation)
+                                                 then do Just loopPID <- SpawnClient (processInputLoop r udpAddrVect [CreateBlock 0 (fst foundPair) "Genesis Block" (intToBits 0) (snd foundPair)] x) --spawn processInputLoop process, passing bound socket (distributed blockchain simulation)
                                                               | Nothing => Action (putStrLn "spawn failed") --if unable to spawn new process
                                                          RequestToWait loopPID 1 --wait for looping process to respond and finish
                                                  else Action (putStrLn "bind failed") --if bind failed
