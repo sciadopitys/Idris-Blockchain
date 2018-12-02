@@ -8,6 +8,7 @@ To start Idris REPL, type:
 idris -p contrib BlockchainMain.idris
 
 To start simple blockchain simulation, type in Idris REPL:
+
 :exec runProc (procMain [])
 
 	Supported user commands:
@@ -17,7 +18,9 @@ To start simple blockchain simulation, type in Idris REPL:
 	
 To start distributed blockchain simulation with n "users" in private network,
 type in n instances of the Idris REPL:
+
 :exec runProc (procMain [p1,p2,...,pn])
+
 where p1 is the port number of the current user and p2...pn are the port numbers
 of the remaining (n-1) users
 
