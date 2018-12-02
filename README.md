@@ -29,7 +29,7 @@ of the remaining (n-1) users
 	add str - Now requires other users to input "receive" command
 	display
 	quit
-	receive - Required to recieve messages from other users
+	receive - Required to receive messages from other users
 	rock/paper/scissors val - Smart Contracts used to play a RPS game between 2 distinct users; 
 	val used to obfuscate play of first player;
 	also requires use of "receive" command
